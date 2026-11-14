@@ -1,13 +1,23 @@
 """Command line entry point.
 
 Usage:
-    python -m envelope_audit INPUT.json OUTPUT.json
-    run_audit.py INPUT.json OUTPUT.json
+    python -m envelope_audit MODE INPUT.json OUTPUT.json
+    run_audit.py MODE INPUT.json OUTPUT.json
 
-Reads UTF-8 JSON with exactly the ``arrival`` and ``service`` members,
-computes the full-domain envelope, and atomically replaces the output file.
-On any validation failure the previous output file is left untouched and the
-error (rooted at ``$``) is printed to stderr with exit code 2.
+``MODE`` is either
+
+* ``audit``   -- the original envelope audit; input has exactly the members
+                 ``arrival`` and ``service`` (fully backwards compatible);
+* ``recover`` -- the bounded flow-summary recovery layer; input has exactly
+                 the members ``t``, ``M``, ``b`` and ``tail``.
+
+Legacy compatibility: the two-argument form ``INPUT.json OUTPUT.json`` is
+still accepted and is treated as ``audit``.
+
+Both modes write UTF-8 JSON and atomically replace the output file: a sibling
+temporary file is written, fsynced and ``os.replace``d.  On any validation or
+computation failure the previous output file is left untouched and the error
+(rooted at ``$``) is printed to stderr with exit code 2.
 """
 
 import json
@@ -15,15 +25,22 @@ import os
 import sys
 import tempfile
 
-from . import process_text
+from . import process_summary_text, process_text
 from .errors import ValidationError
 
+_MODES = {"audit": process_text, "recover": process_summary_text}
+_LEGACY_MODE = "audit"
 
-def run(input_path, output_path):
+
+def _process(mode, text):
+    return _MODES[mode](text)
+
+
+def run(mode, input_path, output_path):
     with open(input_path, "r", encoding="utf-8") as handle:
         text = handle.read()
 
-    result = process_text(text)
+    result = _process(mode, text)
 
     # Atomic replace: write to a sibling temporary file, flush to disk, then
     # os.replace (atomic on POSIX).  If anything fails before the replace, the
@@ -48,12 +65,19 @@ def run(input_path, output_path):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 2:
-        print("usage: python -m envelope_audit INPUT.json OUTPUT.json", file=sys.stderr)
+    if len(argv) == 2:
+        mode = _LEGACY_MODE
+        input_path, output_path = argv
+    elif len(argv) == 3 and argv[0] in _MODES:
+        mode, input_path, output_path = argv
+    else:
+        print(
+            "usage: python -m envelope_audit {audit|recover} INPUT.json OUTPUT.json",
+            file=sys.stderr,
+        )
         return 64
-    input_path, output_path = argv
     try:
-        return run(input_path, output_path)
+        return run(mode, input_path, output_path)
     except ValidationError as exc:
         # All validation failures (syntax errors start with '$' too).
         print(str(exc), file=sys.stderr)
